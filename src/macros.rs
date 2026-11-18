@@ -16,6 +16,9 @@ macro_rules! feature {
 /// with values from the libc crate. It is used the same way as the `bitflags!` macro, except
 /// that only the name of the flag value has to be given.
 ///
+/// An optional leading `_ = mask;` declares externally defined bits, following
+/// the unnamed flag convention of `bitflags!`.
+///
 /// The `libc` crate must be in scope with the name `libc`.
 ///
 /// # Example
@@ -56,6 +59,7 @@ macro_rules! libc_bitflags {
     (
         $(#[$outer:meta])*
         pub struct $BitFlags:ident: $T:ty {
+            $(_ = $mask:expr;)?
             $(
                 $(#[$inner:ident $($args:tt)*])*
                 $Flag:ident $(as $cast:ty)*;
@@ -67,6 +71,7 @@ macro_rules! libc_bitflags {
             #[repr(transparent)]
             $(#[$outer])*
             pub struct $BitFlags: $T {
+                $(const _ = $mask;)?
                 $(
                     $(#[$inner $($args)*])*
                     const $Flag = libc::$Flag $(as $cast)*;

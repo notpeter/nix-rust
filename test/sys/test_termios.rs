@@ -115,3 +115,44 @@ fn test_local_flags() {
     let read = read(&pty.master, &mut buf).unwrap_err();
     assert_eq!(read, Errno::EAGAIN);
 }
+
+// An unchanged round trip must not discard settings unknown to Nix, such as
+// baud-rate bits in c_cflag on illumos. Use a disposable PTY, not the test TTY.
+// BSD speed getters return u32; other targets return BaudRate.
+#[allow(clippy::useless_conversion)]
+#[test]
+fn test_tcsetattr_preserves_flags() {
+    use std::os::fd::AsRawFd;
+
+    let _m = crate::PTSNAME_MTX.lock();
+    let pty = openpty(None, None).unwrap();
+    let fd = pty.slave.as_raw_fd();
+    let mut raw = std::mem::MaybeUninit::<libc::termios>::uninit();
+    assert_eq!(unsafe { libc::tcgetattr(fd, raw.as_mut_ptr()) }, 0);
+    let mut raw = unsafe { raw.assume_init() };
+    assert_eq!(unsafe { libc::cfsetospeed(&mut raw, libc::B38400) }, 0);
+    assert_eq!(unsafe { libc::cfsetispeed(&mut raw, libc::B38400) }, 0);
+    #[cfg(solarish)]
+    {
+        // TAB3 (0014000 in illumos sys/termios.h) is not exposed by libc.
+        raw.c_oflag |= 0o14000;
+    }
+    assert_eq!(unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) }, 0);
+    // Read back the settings actually accepted by the driver.
+    assert_eq!(unsafe { libc::tcgetattr(fd, &mut raw) }, 0);
+
+    let termios = tcgetattr(&pty.slave).unwrap();
+    assert_eq!(termios::cfgetospeed(&termios), BaudRate::B38400.into());
+    assert_eq!(termios::cfgetispeed(&termios), BaudRate::B38400.into());
+    termios::tcsetattr(&pty.slave, termios::SetArg::TCSANOW, &termios).unwrap();
+
+    let mut after = std::mem::MaybeUninit::<libc::termios>::uninit();
+    assert_eq!(unsafe { libc::tcgetattr(fd, after.as_mut_ptr()) }, 0);
+    let after = unsafe { after.assume_init() };
+    assert_eq!(after.c_iflag, raw.c_iflag);
+    assert_eq!(after.c_oflag, raw.c_oflag);
+    assert_eq!(after.c_cflag, raw.c_cflag);
+    assert_eq!(after.c_lflag, raw.c_lflag);
+    assert_eq!(unsafe { libc::cfgetospeed(&after) }, libc::B38400);
+    assert_eq!(unsafe { libc::cfgetispeed(&after) }, libc::B38400);
+}

@@ -31,8 +31,8 @@
 //!
 //! The flags within `Termios` are defined as bitfields using the `bitflags` crate. This provides
 //! an interface for working with bitfields that is similar to working with the raw unsigned
-//! integer types but offers type safety because of the internal checking that values will always
-//! be a valid combination of the defined flags.
+//! integer types while keeping the different flag types distinct. All bits are preserved,
+//! including OS-defined bits without named constants in Nix.
 //!
 //! An example showing some of the basic operations for interacting with the control flags:
 //!
@@ -152,6 +152,11 @@ use crate::unistd::Pid;
 /// This is a wrapper around the `libc::termios` struct that provides a safe interface for the
 /// standard fields. The only safe way to obtain an instance of this struct is to extract it from
 /// an open port using `tcgetattr()`.
+///
+/// The flag fields preserve all OS-defined bits, including those without named
+/// constants in Nix. Modify the settings returned by `tcgetattr()` to preserve
+/// these bits. For these flag types, `all()` includes every bit and complement
+/// operations preserve unnamed bits when used to clear named flags.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Termios {
     inner: RefCell<libc::termios>,
@@ -219,10 +224,10 @@ impl Termios {
     /// Updates the wrapper values from the internal `libc::termios` data structure.
     pub(crate) fn update_wrapper(&mut self) {
         let termios = *self.inner.borrow_mut();
-        self.input_flags = InputFlags::from_bits_truncate(termios.c_iflag);
-        self.output_flags = OutputFlags::from_bits_truncate(termios.c_oflag);
+        self.input_flags = InputFlags::from_bits_retain(termios.c_iflag);
+        self.output_flags = OutputFlags::from_bits_retain(termios.c_oflag);
         self.control_flags = ControlFlags::from_bits_retain(termios.c_cflag);
-        self.local_flags = LocalFlags::from_bits_truncate(termios.c_lflag);
+        self.local_flags = LocalFlags::from_bits_retain(termios.c_lflag);
         self.control_chars = termios.c_cc;
         #[cfg(any(linux_android, target_os = "haiku"))]
         {
@@ -235,10 +240,10 @@ impl From<libc::termios> for Termios {
     fn from(termios: libc::termios) -> Self {
         Termios {
             inner: RefCell::new(termios),
-            input_flags: InputFlags::from_bits_truncate(termios.c_iflag),
-            output_flags: OutputFlags::from_bits_truncate(termios.c_oflag),
-            control_flags: ControlFlags::from_bits_truncate(termios.c_cflag),
-            local_flags: LocalFlags::from_bits_truncate(termios.c_lflag),
+            input_flags: InputFlags::from_bits_retain(termios.c_iflag),
+            output_flags: OutputFlags::from_bits_retain(termios.c_oflag),
+            control_flags: ControlFlags::from_bits_retain(termios.c_cflag),
+            local_flags: LocalFlags::from_bits_retain(termios.c_lflag),
             control_chars: termios.c_cc,
             #[cfg(any(linux_android, target_os = "haiku"))]
             line_discipline: termios.c_line,
@@ -467,6 +472,8 @@ pub use libc::_POSIX_VDISABLE;
 libc_bitflags! {
     /// Flags for configuring the input mode of a terminal
     pub struct InputFlags: tcflag_t {
+        // Preserve OS-defined bits that do not have named constants in Nix.
+        _ = !0;
         IGNBRK;
         BRKINT;
         IGNPAR;
@@ -498,6 +505,8 @@ libc_bitflags! {
 libc_bitflags! {
     /// Flags for configuring the output mode of a terminal
     pub struct OutputFlags: tcflag_t {
+        // Preserve OS-defined bits that do not have named constants in Nix.
+        _ = !0;
         OPOST;
         #[cfg(any(linux_android,
                   target_os = "haiku",
@@ -630,6 +639,8 @@ libc_bitflags! {
 libc_bitflags! {
     /// Flags for setting the control mode of a terminal
     pub struct ControlFlags: tcflag_t {
+        // Preserve OS-defined bits that do not have named constants in Nix.
+        _ = !0;
         #[cfg(bsd)]
         CIGNORE;
         CS5;
@@ -680,6 +691,8 @@ libc_bitflags! {
 libc_bitflags! {
     /// Flags for setting any local modes
     pub struct LocalFlags: tcflag_t {
+        // Preserve OS-defined bits that do not have named constants in Nix.
+        _ = !0;
         #[cfg(not(target_os = "redox"))]
         ECHOKE;
         ECHOE;
@@ -946,4 +959,66 @@ pub fn tcgetsid<Fd: AsFd>(fd: Fd) -> Result<Pid> {
 
     Errno::result(res).map(Pid::from_raw)
 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_flags_eq(termios: &Termios, raw: &libc::termios) {
+        assert_eq!(termios.input_flags.bits(), raw.c_iflag);
+        assert_eq!(termios.output_flags.bits(), raw.c_oflag);
+        assert_eq!(termios.control_flags.bits(), raw.c_cflag);
+        assert_eq!(termios.local_flags.bits(), raw.c_lflag);
+        let inner = termios.get_libc_termios();
+        assert_eq!(inner.c_iflag, raw.c_iflag);
+        assert_eq!(inner.c_oflag, raw.c_oflag);
+        assert_eq!(inner.c_cflag, raw.c_cflag);
+        assert_eq!(inner.c_lflag, raw.c_lflag);
+    }
+
+    #[test]
+    fn test_preserve_termios_bits() {
+        // Exercise every bit, including those without a named flag on this OS.
+        // This synthetic structure is never passed to a terminal device.
+        let mut raw: libc::termios = unsafe { mem::zeroed() };
+        raw.c_iflag = !0;
+        raw.c_oflag = !0;
+        raw.c_cflag = !0;
+        raw.c_lflag = !0;
+        let mut termios = Termios::from(raw);
+        assert_flags_eq(&termios, &raw);
+
+        termios.input_flags &= !InputFlags::IGNBRK;
+        termios.output_flags &= !OutputFlags::OPOST;
+        termios.control_flags &= !ControlFlags::CREAD;
+        termios.local_flags &= !LocalFlags::ECHO;
+        raw.c_iflag &= !libc::IGNBRK;
+        raw.c_oflag &= !libc::OPOST;
+        raw.c_cflag &= !libc::CREAD;
+        raw.c_lflag &= !libc::ECHO;
+        assert_flags_eq(&termios, &raw);
+
+        termios.input_flags.remove(InputFlags::BRKINT);
+        termios.output_flags.remove(OutputFlags::OCRNL);
+        termios.control_flags.remove(ControlFlags::CLOCAL);
+        termios.local_flags.remove(LocalFlags::ICANON);
+        raw.c_iflag &= !libc::BRKINT;
+        raw.c_oflag &= !libc::OCRNL;
+        raw.c_cflag &= !libc::CLOCAL;
+        raw.c_lflag &= !libc::ICANON;
+        assert_flags_eq(&termios, &raw);
+
+        // Compare libc mutations with the wrapper, including synchronization
+        // in both directions. No device is needed for these operations.
+        assert_eq!(unsafe { libc::cfsetospeed(&mut raw, libc::B9600) }, 0);
+        cfsetospeed(&mut termios, BaudRate::B9600).unwrap();
+        assert_flags_eq(&termios, &raw);
+        assert_eq!(unsafe { libc::cfsetispeed(&mut raw, libc::B9600) }, 0);
+        cfsetispeed(&mut termios, BaudRate::B9600).unwrap();
+        assert_flags_eq(&termios, &raw);
+        unsafe { libc::cfmakeraw(&mut raw) };
+        cfmakeraw(&mut termios);
+        assert_flags_eq(&termios, &raw);
+    }
 }
