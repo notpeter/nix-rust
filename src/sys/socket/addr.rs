@@ -1974,17 +1974,20 @@ mod datalink {
             let alen = self.alen();
             let data_len = self.0.sdl_data.len();
 
-            alen == 0 || nlen + alen >= data_len
+            alen == 0 || nlen + alen > data_len
         }
 
-        /// Physical-layer address (MAC)
+        /// Physical-layer address (MAC).
+        ///
+        /// Returns `None` if the address is not six bytes long or does not fit
+        /// in the underlying storage.
         // The cast is not unnecessary on all platforms.
         #[allow(clippy::unnecessary_cast)]
         pub fn addr(&self) -> Option<[u8; 6]> {
             let nlen = self.nlen();
             let data = self.0.sdl_data;
 
-            if self.is_empty() {
+            if self.alen() != 6 || self.is_empty() {
                 None
             } else {
                 Some([
@@ -2222,6 +2225,35 @@ mod tests {
                 ..unsafe { mem::zeroed() }
             });
             let _ = format!("{la}");
+        }
+
+        #[cfg(any(bsd, solarish, target_os = "haiku", target_os = "aix"))]
+        #[test]
+        fn datalink_exact_fit() {
+            let mut raw: libc::sockaddr_dl = unsafe { mem::zeroed() };
+            let start = raw.sdl_data.len() - 6;
+            raw.sdl_nlen = start as u8;
+            raw.sdl_alen = 6;
+            for (i, byte) in raw.sdl_data[start..].iter_mut().enumerate() {
+                *byte = (i + 1) as _;
+            }
+            let addr = LinkAddr(raw);
+            assert!(!addr.is_empty());
+            assert_eq!(addr.addr(), Some([1, 2, 3, 4, 5, 6]));
+        }
+
+        #[cfg(any(bsd, solarish, target_os = "haiku", target_os = "aix"))]
+        #[test]
+        fn datalink_non_ethernet_length() {
+            let mut raw: libc::sockaddr_dl = unsafe { mem::zeroed() };
+            for len in [1, 5, 7, 8] {
+                raw.sdl_alen = len;
+                assert_eq!(LinkAddr(raw).addr(), None);
+            }
+            // A short address near the end must not read six bytes past it.
+            raw.sdl_nlen = (raw.sdl_data.len() - 2) as u8;
+            raw.sdl_alen = 1;
+            assert_eq!(LinkAddr(raw).addr(), None);
         }
 
         #[cfg(all(
